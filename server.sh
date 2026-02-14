@@ -247,7 +247,7 @@ main() {
     [[ -n "$domain" ]] && echo "  Domain:      ${BOLD}${domain}${RESET}"
     echo ""
     echo "  From your local machine, run:"
-    echo "    ${DIM}./stairway.sh connect ${tunnel_port}:<local_port> user@$(hostname -I 2>/dev/null | awk '{print $1}' || echo '<this-ip>')${RESET}"
+    echo "    ${DIM}stairway connect ${tunnel_port}:<local_port> user@$(hostname -I 2>/dev/null | awk '{print $1}' || echo '<this-ip>')${RESET}"
     echo ""
 }
 
