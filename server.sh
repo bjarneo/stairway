@@ -208,6 +208,11 @@ main() {
 
     need_root
 
+    # Guard against port conflicts with nginx
+    if [[ "$tunnel_port" == "80" || "$tunnel_port" == "443" ]] && $do_nginx && [[ -n "$domain" ]]; then
+        die "Tunnel port ${tunnel_port} conflicts with nginx (which needs 80/443).\n  Use a different port, e.g.: --port 8080"
+    fi
+
     echo ""
     echo "  ${BOLD}Server Setup${RESET}"
     echo "  ${DIM}────────────────────────────────${RESET}"
