@@ -121,7 +121,7 @@ _next_port() {
         [[ -f "$meta" ]] || continue
         local REMOTE_PORT=""
         _read_meta "$meta"
-        [[ -n "$REMOTE_PORT" ]] && used+=("$REMOTE_PORT")
+        if [[ -n "$REMOTE_PORT" ]]; then used+=("$REMOTE_PORT"); fi
     done
 
     if [[ ${#used[@]} -gt 0 ]]; then
@@ -206,7 +206,7 @@ EOF
 
     local scp_args=(-o "StrictHostKeyChecking=accept-new")
     local ssh_args=(-o "StrictHostKeyChecking=accept-new" -o "ConnectTimeout=10")
-    [[ -n "$ssh_key" ]] && scp_args+=(-i "$ssh_key") && ssh_args+=(-i "$ssh_key")
+    if [[ -n "$ssh_key" ]]; then scp_args+=(-i "$ssh_key"); ssh_args+=(-i "$ssh_key"); fi
 
     # Upload and install
     scp "${scp_args[@]}" "$script" "${host}:/tmp/stairway-server.sh"
@@ -247,8 +247,8 @@ cmd_up() {
     [[ -z "$local_port" ]] && die "Usage: stairway up <local_port> [-d domain] [-p remote_port]"
 
     _validate_port "$local_port"
-    [[ -n "$remote_port" ]] && _validate_port "$remote_port"
-    [[ -n "$domain" ]] && _validate_domain "$domain"
+    if [[ -n "$remote_port" ]]; then _validate_port "$remote_port"; fi
+    if [[ -n "$domain" ]]; then _validate_domain "$domain"; fi
 
     check_autossh
     ensure_dirs
@@ -267,7 +267,7 @@ cmd_up() {
     if [[ -n "$domain" ]]; then
         info "Configuring ${BOLD}${domain}${RESET} on server..."
         local ssh_args=(-o "StrictHostKeyChecking=accept-new" -o "ConnectTimeout=10")
-        [[ -n "$_srv_key" ]] && ssh_args+=(-i "$_srv_key")
+        if [[ -n "$_srv_key" ]]; then ssh_args+=(-i "$_srv_key"); fi
         ssh "${ssh_args[@]}" "$_srv_host" sudo "${REMOTE_SCRIPT}" nginx "${domain}" "${remote_port}"
     fi
 
@@ -295,7 +295,7 @@ cmd_up() {
         -o "ExitOnForwardFailure=yes"
         -o "StrictHostKeyChecking=accept-new"
     )
-    [[ -n "$_srv_key" ]] && ssh_opts+=(-i "$_srv_key")
+    if [[ -n "$_srv_key" ]]; then ssh_opts+=(-i "$_srv_key"); fi
 
     echo ""
     info "Opening tunnel ${BOLD}${id}${RESET}"
