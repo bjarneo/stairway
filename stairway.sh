@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────
-# stairway.sh — local tunnel client (self-hosted ngrok)
-# Run this on your local machine to expose local ports.
+# stairway — self-hosted ngrok alternative
+# Single CLI to set up your server and manage tunnels.
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 
-readonly VERSION="1.0.0"
+readonly VERSION="2.0.0"
 readonly STATE_DIR="${STAIRWAY_HOME:-$HOME/.stairway}"
 readonly TUNNELS_DIR="$STATE_DIR/tunnels"
+readonly SERVERS_DIR="$STATE_DIR/servers"
+readonly REPO_URL="https://raw.githubusercontent.com/bjarneo/stairway/main"
+readonly REMOTE_SCRIPT="/opt/stairway/server.sh"
 
 # ── Colors ────────────────────────────────────────────────────
 if [[ -t 1 ]]; then
@@ -22,7 +25,7 @@ warn() { printf "%s\n" "${YELLOW}▸${RESET} $*" >&2; }
 err()  { printf "%s\n" "${RED}✖${RESET} $*" >&2; }
 die()  { err "$@"; exit 1; }
 
-ensure_dirs() { mkdir -p "$TUNNELS_DIR"; }
+ensure_dirs() { mkdir -p "$TUNNELS_DIR" "$SERVERS_DIR"; }
 
 # ── Dependency check ──────────────────────────────────────────
 check_autossh() {
@@ -39,34 +42,135 @@ check_autossh() {
     exit 1
 }
 
-# ── Tunnel ID (deterministic hash) ───────────────────────────
-tunnel_id() {
+# ── Server config helpers ─────────────────────────────────────
+_load_server() {
+    local name="$1"
+    local conf="$SERVERS_DIR/${name}.conf"
+
+    if [[ ! -f "$conf" ]]; then
+        die "Server '${name}' not found. Run: stairway init -s user@host"
+    fi
+
+    # shellcheck disable=SC1090
+    source "$conf"
+    _srv_host="${HOST:-}"
+    _srv_key="${SSH_KEY:-}"
+}
+
+# ── Find server.sh locally ────────────────────────────────────
+_find_server_script() {
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    if [[ -f "$script_dir/server.sh" ]]; then
+        echo "$script_dir/server.sh"
+    elif [[ -f "$STATE_DIR/server.sh" ]]; then
+        echo "$STATE_DIR/server.sh"
+    else
+        mkdir -p "$STATE_DIR"
+        info "Downloading server.sh..."
+        curl -fsSL "${REPO_URL}/server.sh" -o "$STATE_DIR/server.sh"
+        chmod +x "$STATE_DIR/server.sh"
+        echo "$STATE_DIR/server.sh"
+    fi
+}
+
+# ── Auto port assignment ──────────────────────────────────────
+_next_port() {
+    local port=10000
+    local used=()
+
+    for meta in "$TUNNELS_DIR"/*.meta; do
+        [[ -f "$meta" ]] || continue
+        local REMOTE_PORT=""
+        # shellcheck disable=SC1090
+        source "$meta"
+        [[ -n "$REMOTE_PORT" ]] && used+=("$REMOTE_PORT")
+    done
+
+    if [[ ${#used[@]} -gt 0 ]]; then
+        while printf '%s\n' "${used[@]}" | grep -qx "$port"; do
+            port=$((port + 1))
+        done
+    fi
+
+    echo "$port"
+}
+
+# ── Tunnel ID ─────────────────────────────────────────────────
+_tunnel_id() {
     printf "%s" "$1-$2" | md5sum 2>/dev/null | cut -c1-8 \
         || printf "%s" "$1-$2" | md5 2>/dev/null | cut -c1-8
 }
 
-# ── Connect ───────────────────────────────────────────────────
-cmd_connect() {
-    local remote_port="" local_port="" local_host="localhost"
-    local host="" ssh_key="" bind_addr="0.0.0.0"
+# ══════════════════════════════════════════════════════════════
+# Commands
+# ══════════════════════════════════════════════════════════════
+
+# ── init ──────────────────────────────────────────────────────
+cmd_init() {
+    local host="" ssh_key="" name="default"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -r|--remote)    remote_port="$2"; shift 2 ;;
-            -l|--local)     local_port="$2"; shift 2 ;;
-            -s|--server)    host="$2"; shift 2 ;;
-            -k|--key)       ssh_key="$2"; shift 2 ;;
-            -b|--bind)      local_host="$2"; shift 2 ;;
-            --bind-remote)  bind_addr="$2"; shift 2 ;;
-            -*)             die "Unknown option: $1" ;;
+            -s|--server) host="$2"; shift 2 ;;
+            -k|--key)    ssh_key="$2"; shift 2 ;;
+            -n|--name)   name="$2"; shift 2 ;;
+            -*)          die "Unknown option: $1" ;;
+            *)           [[ -z "$host" ]] && host="$1" && shift || die "Unexpected: $1" ;;
+        esac
+    done
+
+    [[ -z "$host" ]] && die "Usage: stairway init -s user@host"
+
+    ensure_dirs
+
+    # Save server config
+    cat > "$SERVERS_DIR/${name}.conf" <<EOF
+HOST=${host}
+SSH_KEY=${ssh_key}
+EOF
+    info "Server '${name}' saved."
+
+    # Find server.sh
+    local script
+    script=$(_find_server_script)
+
+    info "Installing server component on ${BOLD}${host}${RESET}..."
+
+    local scp_args=(-o "StrictHostKeyChecking=accept-new")
+    local ssh_args=(-o "StrictHostKeyChecking=accept-new" -o "ConnectTimeout=10")
+    [[ -n "$ssh_key" ]] && scp_args+=(-i "$ssh_key") && ssh_args+=(-i "$ssh_key")
+
+    # Upload and install
+    scp "${scp_args[@]}" "$script" "${host}:/tmp/stairway-server.sh"
+    ssh "${ssh_args[@]}" "$host" \
+        "sudo mkdir -p /opt/stairway && sudo mv /tmp/stairway-server.sh ${REMOTE_SCRIPT} && sudo chmod +x ${REMOTE_SCRIPT} && sudo ${REMOTE_SCRIPT} setup"
+
+    echo ""
+    info "${GREEN}Server '${name}' is ready!${RESET}"
+    echo ""
+    echo "  Now expose a local port:"
+    echo "    ${DIM}stairway up 3000${RESET}"
+    echo ""
+    echo "  Or with a custom domain:"
+    echo "    ${DIM}stairway up 3000 -d api.example.com${RESET}"
+    echo ""
+}
+
+# ── up ────────────────────────────────────────────────────────
+cmd_up() {
+    local local_port="" domain="" remote_port="" name="default"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -d|--domain) domain="$2"; shift 2 ;;
+            -p|--port)   remote_port="$2"; shift 2 ;;
+            -n|--name)   name="$2"; shift 2 ;;
+            -*)          die "Unknown option: $1" ;;
             *)
-                # Positional: REMOTE:LOCAL USER@HOST
-                if [[ -z "$remote_port" && "$1" == *:* ]]; then
-                    remote_port="${1%%:*}"
-                    local_port="${1##*:}"
-                    shift
-                elif [[ -z "$host" ]]; then
-                    host="$1"; shift
+                if [[ -z "$local_port" ]]; then
+                    local_port="$1"; shift
                 else
                     die "Unexpected argument: $1"
                 fi
@@ -74,42 +178,56 @@ cmd_connect() {
         esac
     done
 
-    [[ -z "$remote_port" ]] && die "Missing remote port.\n  Usage: stairway connect 8080:3000 user@host"
-    [[ -z "$local_port" ]]  && die "Missing local port.\n  Usage: stairway connect 8080:3000 user@host"
-    [[ -z "$host" ]]        && die "Missing SSH host.\n  Usage: stairway connect 8080:3000 user@host"
+    [[ -z "$local_port" ]] && die "Usage: stairway up <local_port> [-d domain] [-p remote_port]"
 
     check_autossh
     ensure_dirs
 
+    _load_server "$name"
+
+    # Auto-assign remote port
+    if [[ -z "$remote_port" ]]; then
+        remote_port=$(_next_port)
+    fi
+
+    # Set up domain remotely if requested
+    if [[ -n "$domain" ]]; then
+        info "Configuring ${BOLD}${domain}${RESET} on server..."
+        local ssh_args=(-o "StrictHostKeyChecking=accept-new" -o "ConnectTimeout=10")
+        [[ -n "$_srv_key" ]] && ssh_args+=(-i "$_srv_key")
+        ssh "${ssh_args[@]}" "$_srv_host" "sudo ${REMOTE_SCRIPT} nginx '${domain}' '${remote_port}'"
+    fi
+
+    # Check for existing tunnel
     local id
-    id=$(tunnel_id "$remote_port" "$host")
+    id=$(_tunnel_id "$remote_port" "$_srv_host")
     local pid_file="$TUNNELS_DIR/${id}.pid"
     local meta_file="$TUNNELS_DIR/${id}.meta"
 
-    # Check for existing tunnel with same ID
     if [[ -f "$pid_file" ]]; then
         local old_pid
         old_pid=$(cat "$pid_file")
         if kill -0 "$old_pid" 2>/dev/null; then
-            warn "Tunnel ${BOLD}${id}${RESET} is already running (PID ${old_pid})."
-            warn "Run ${BOLD}stairway disconnect ${id}${RESET} first."
+            warn "Tunnel ${BOLD}${id}${RESET} already running (PID ${old_pid})."
+            warn "Run ${BOLD}stairway down ${id}${RESET} first."
             return 1
         fi
         rm -f "$pid_file" "$meta_file"
     fi
 
+    # Build SSH options
     local ssh_opts=(
         -o "ServerAliveInterval=30"
         -o "ServerAliveCountMax=3"
         -o "ExitOnForwardFailure=yes"
         -o "StrictHostKeyChecking=accept-new"
     )
-    [[ -n "$ssh_key" ]] && ssh_opts+=(-i "$ssh_key")
+    [[ -n "$_srv_key" ]] && ssh_opts+=(-i "$_srv_key")
 
     echo ""
     info "Opening tunnel ${BOLD}${id}${RESET}"
-    echo "  ${DIM}Remote:${RESET} ${host}:${remote_port}"
-    echo "  ${DIM}Local:${RESET}  ${local_host}:${local_port}"
+    echo "  ${DIM}Remote:${RESET} ${_srv_host}:${remote_port}"
+    echo "  ${DIM}Local:${RESET}  localhost:${local_port}"
     echo ""
 
     export AUTOSSH_PIDFILE="$pid_file"
@@ -117,8 +235,8 @@ cmd_connect() {
 
     autossh -M 0 -f -N \
         "${ssh_opts[@]}" \
-        -R "${bind_addr}:${remote_port}:${local_host}:${local_port}" \
-        "$host"
+        -R "0.0.0.0:${remote_port}:localhost:${local_port}" \
+        "$_srv_host"
 
     # Wait for PID file
     local retries=15
@@ -135,27 +253,32 @@ cmd_connect() {
 TUNNEL_ID=${id}
 REMOTE_PORT=${remote_port}
 LOCAL_PORT=${local_port}
-LOCAL_HOST=${local_host}
-SSH_HOST=${host}
-BIND_ADDR=${bind_addr}
+LOCAL_HOST=localhost
+SSH_HOST=${_srv_host}
+DOMAIN=${domain}
 PID=${pid}
+SERVER=${name}
 STARTED=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 EOF
         info "${GREEN}Tunnel is live!${RESET} (PID ${pid})"
         echo ""
-        echo "  ${BOLD}→ http://${host}:${remote_port}${RESET}"
+        if [[ -n "$domain" ]]; then
+            echo "  ${BOLD}→ https://${domain}${RESET}"
+        else
+            echo "  ${BOLD}→ http://${_srv_host}:${remote_port}${RESET}"
+        fi
         echo ""
     else
-        die "Failed to start tunnel — check SSH connectivity to ${host}"
+        die "Failed to start tunnel — check SSH connectivity to ${_srv_host}"
     fi
 }
 
-# ── Disconnect ────────────────────────────────────────────────
-cmd_disconnect() {
+# ── down ──────────────────────────────────────────────────────
+cmd_down() {
     ensure_dirs
     local target="${1:-}"
 
-    [[ -z "$target" ]] && die "Usage: stairway disconnect <id|all>"
+    [[ -z "$target" ]] && die "Usage: stairway down <id|all>"
 
     if [[ "$target" == "all" ]]; then
         local count=0
@@ -201,20 +324,20 @@ _kill_tunnel() {
     rm -f "$pid_file" "$meta_file"
 }
 
-# ── Status ────────────────────────────────────────────────────
+# ── status ────────────────────────────────────────────────────
 cmd_status() {
     ensure_dirs
     local found=0
 
     echo ""
-    printf "${BOLD}  %-10s %-8s %-24s %-20s %s${RESET}\n" "ID" "STATUS" "REMOTE" "LOCAL" "PID"
-    printf "  ${DIM}──────────────────────────────────────────────────────────────────────${RESET}\n"
+    printf "${BOLD}  %-10s %-8s %-26s %-20s %s${RESET}\n" "ID" "STATUS" "ENDPOINT" "LOCAL" "PID"
+    printf "  ${DIM}──────────────────────────────────────────────────────────────────────────${RESET}\n"
 
     for meta_file in "$TUNNELS_DIR"/*.meta; do
         [[ -f "$meta_file" ]] || continue
         found=1
 
-        local TUNNEL_ID="" REMOTE_PORT="" LOCAL_PORT="" LOCAL_HOST="" SSH_HOST="" PID="" STARTED="" BIND_ADDR=""
+        local TUNNEL_ID="" REMOTE_PORT="" LOCAL_PORT="" LOCAL_HOST="" SSH_HOST="" PID="" DOMAIN="" SERVER="" STARTED=""
         # shellcheck disable=SC1090
         source "$meta_file"
 
@@ -223,11 +346,18 @@ cmd_status() {
             status="${GREEN}live${RESET}"
         fi
 
-        printf "  %-10s %-17s %-24s %-20s %s\n" \
+        local endpoint
+        if [[ -n "$DOMAIN" ]]; then
+            endpoint="https://${DOMAIN}"
+        else
+            endpoint="${SSH_HOST}:${REMOTE_PORT}"
+        fi
+
+        printf "  %-10s %-17s %-26s %-20s %s\n" \
             "$TUNNEL_ID" \
             "$status" \
-            "${SSH_HOST}:${REMOTE_PORT}" \
-            "${LOCAL_HOST}:${LOCAL_PORT}" \
+            "$endpoint" \
+            "localhost:${LOCAL_PORT}" \
             "$PID"
     done
 
@@ -235,7 +365,7 @@ cmd_status() {
     echo ""
 }
 
-# ── Clean ─────────────────────────────────────────────────────
+# ── clean ─────────────────────────────────────────────────────
 cmd_clean() {
     ensure_dirs
     local count=0
@@ -255,41 +385,51 @@ cmd_clean() {
     info "Cleaned ${count} stale tunnel(s)."
 }
 
-# ── Help ──────────────────────────────────────────────────────
+# ── help ──────────────────────────────────────────────────────
 cmd_help() {
     cat <<EOF
 
-  ${BOLD}${CYAN}stairway${RESET} ${DIM}v${VERSION}${RESET} — SSH tunnel client
+  ${BOLD}${CYAN}stairway${RESET} ${DIM}v${VERSION}${RESET} — self-hosted ngrok alternative
 
   ${BOLD}USAGE${RESET}
     stairway <command> [options]
 
   ${BOLD}COMMANDS${RESET}
-    connect      ${DIM}<remote:local> <user@host>${RESET}   Open a tunnel
-    disconnect   ${DIM}<id|all>${RESET}                     Close tunnel(s)
-    status                                     List active tunnels
-    clean                                      Remove stale PID files
+    init     ${DIM}-s <user@host>${RESET}             Set up a new server
+    up       ${DIM}<local_port>${RESET}                Expose a local port
+    down     ${DIM}<id|all>${RESET}                    Close tunnel(s)
+    status                                List active tunnels
+    clean                                 Remove stale entries
 
-  ${BOLD}CONNECT OPTIONS${RESET}
-    -r, --remote  ${DIM}<port>${RESET}      Remote port on VPS
-    -l, --local   ${DIM}<port>${RESET}      Local port to forward
-    -s, --server  ${DIM}<user@ip>${RESET}   SSH destination
-    -k, --key     ${DIM}<path>${RESET}      SSH private key
-    -b, --bind    ${DIM}<host>${RESET}      Local bind address   ${DIM}(default: localhost)${RESET}
-    --bind-remote ${DIM}<addr>${RESET}      Remote bind address  ${DIM}(default: 0.0.0.0)${RESET}
+  ${BOLD}INIT OPTIONS${RESET}
+    -s, --server ${DIM}<user@host>${RESET}    SSH destination (required)
+    -k, --key    ${DIM}<path>${RESET}         SSH private key
+    -n, --name   ${DIM}<name>${RESET}         Server name ${DIM}(default: "default")${RESET}
+
+  ${BOLD}UP OPTIONS${RESET}
+    -d, --domain ${DIM}<domain>${RESET}       Set up nginx + SSL and tunnel through it
+    -p, --port   ${DIM}<port>${RESET}         Remote port ${DIM}(default: auto-assigned)${RESET}
+    -n, --name   ${DIM}<name>${RESET}         Which server to use ${DIM}(default: "default")${RESET}
 
   ${BOLD}EXAMPLES${RESET}
-    ${DIM}# Expose local :3000 on your VPS :8080${RESET}
-    stairway connect 8080:3000 root@203.0.113.10
+    ${DIM}# One-time server setup${RESET}
+    stairway init -s root@203.0.113.10
 
-    ${DIM}# With a specific SSH key${RESET}
-    stairway connect -r 80 -l 3000 -s deploy@myserver -k ~/.ssh/id_tunnel
+    ${DIM}# Expose local port 3000${RESET}
+    stairway up 3000
 
-    ${DIM}# Check what's running${RESET}
+    ${DIM}# Expose with a custom domain (sets up nginx + SSL automatically)${RESET}
+    stairway up 3000 -d api.example.com
+
+    ${DIM}# Use a named server${RESET}
+    stairway init -s root@staging.example.com -n staging
+    stairway up 3000 -n staging
+
+    ${DIM}# Check tunnels${RESET}
     stairway status
 
-    ${DIM}# Tear down everything${RESET}
-    stairway disconnect all
+    ${DIM}# Tear down${RESET}
+    stairway down all
 
 EOF
 }
@@ -300,8 +440,9 @@ main() {
     shift || true
 
     case "$cmd" in
-        connect|c)      cmd_connect "$@" ;;
-        disconnect|dc)  cmd_disconnect "$@" ;;
+        init|i)         cmd_init "$@" ;;
+        up|u)           cmd_up "$@" ;;
+        down|d)         cmd_down "$@" ;;
         status|s|ls)    cmd_status "$@" ;;
         clean)          cmd_clean "$@" ;;
         version|-v)     echo "stairway v${VERSION}" ;;

@@ -1,52 +1,29 @@
 # Stairway
 
-A self-hosted ngrok alternative in two bash scripts. One runs on your VPS, the other on your laptop. Traffic flows through SSH tunnels you control.
+A self-hosted ngrok alternative in bash. One CLI to set up your server and expose local ports to the internet.
 
 No accounts. No third-party servers. No monthly fees.
 
 ## How It Works
 
-**server.sh** configures your VPS to accept tunnel connections. It enables `GatewayPorts` in sshd, optionally sets up nginx as a reverse proxy, provisions SSL with Let's Encrypt, and opens the right firewall ports.
+Stairway uses SSH remote port forwarding to tunnel traffic from a public VPS to your local machine. It wraps `autossh` for automatic reconnection and manages nginx + Let's Encrypt on the server side, all from a single command on your laptop.
 
-**stairway.sh** runs on your local machine. It wraps `autossh` to create persistent, auto-reconnecting SSH tunnels that expose your local ports through the VPS.
-
-## Server Setup
-
-SSH into your VPS and run the install script:
+## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/bjarneo/stairway/main/server.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/bjarneo/stairway/main/stairway.sh -o /tmp/stairway
+chmod +x /tmp/stairway
+
+if command -v stairway &>/dev/null; then
+  echo "Warning: 'stairway' already exists at $(which stairway)"
+  echo "Remove it first or choose a different install path."
+else
+  sudo mv /tmp/stairway /usr/local/bin/stairway
+  echo "Installed to /usr/local/bin/stairway"
+fi
 ```
 
-This runs the minimal setup: enables `GatewayPorts` in sshd and restarts the daemon. Your VPS is now ready to accept tunnels.
-
-### Full Setup with Domain and SSL
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/bjarneo/stairway/main/server.sh \
-  | sudo bash -s -- -d api.example.com -p 8080
-```
-
-This will:
-
-1. Configure sshd with `GatewayPorts yes`
-2. Install and configure nginx as a reverse proxy from your domain to the tunnel port
-3. Provision a free SSL certificate via Let's Encrypt
-4. Open ports 22, 80, 443, and your tunnel port in the firewall
-
-### Server Options
-
-```
-sudo ./server.sh                              # sshd only
-sudo ./server.sh -d api.example.com           # sshd + nginx + ssl
-sudo ./server.sh -d api.example.com -p 9090   # custom tunnel port
-sudo ./server.sh -d api.example.com --no-ssl  # skip ssl
-sudo ./server.sh --no-firewall                # skip firewall config
-```
-
-## Client Setup
-
-Install `autossh` on your local machine:
+Stairway requires `autossh` on your local machine:
 
 ```bash
 # macOS
@@ -62,89 +39,112 @@ sudo pacman -S autossh
 sudo dnf install autossh
 ```
 
-Then install `stairway`:
+## Quick Start
+
+### 1. Point stairway at your VPS
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/bjarneo/stairway/main/stairway.sh -o /tmp/stairway
-chmod +x /tmp/stairway
-
-# Verify no existing binary conflicts with the name
-if command -v stairway &>/dev/null; then
-  echo "Warning: 'stairway' already exists at $(which stairway)"
-  echo "Remove it first or choose a different install path."
-else
-  sudo mv /tmp/stairway /usr/local/bin/stairway
-  echo "Installed to /usr/local/bin/stairway"
-fi
+stairway init -s root@203.0.113.10
 ```
+
+This SSHes into your server, configures `GatewayPorts` in sshd, sets up firewall rules, and saves the connection details locally. You only run this once.
+
+### 2. Expose a local port
+
+```bash
+stairway up 3000
+```
+
+That's it. Stairway auto-assigns a remote port and prints the public URL.
+
+### 3. Expose with a custom domain
+
+```bash
+stairway up 3000 -d api.example.com
+```
+
+This automatically installs nginx on your VPS, configures a reverse proxy, provisions an SSL certificate via Let's Encrypt, and opens the tunnel. Point your domain's A record to your VPS IP beforehand.
 
 ## Usage
 
-### Open a Tunnel
-
-Expose your local port 3000 on the VPS at port 8080:
+### Init a server
 
 ```bash
-stairway connect 8080:3000 user@your-vps-ip
+stairway init -s root@203.0.113.10
+stairway init -s deploy@myserver -k ~/.ssh/id_tunnel
+stairway init -s root@staging.example.com -n staging
 ```
 
-The tunnel runs in the background and automatically reconnects if your connection drops.
+### Open a tunnel
 
-### Check Active Tunnels
+```bash
+stairway up 3000                             # auto-assign remote port
+stairway up 3000 -d api.example.com          # with domain + SSL
+stairway up 8080 -p 9090                     # explicit remote port
+stairway up 3000 -n staging                  # use a named server
+```
+
+### Check active tunnels
 
 ```bash
 stairway status
 ```
 
 ```
-  ID         STATUS   REMOTE                   LOCAL                PID
-  ──────────────────────────────────────────────────────────────────────
-  a1b2c3d4   live     root@203.0.113.10:8080   localhost:3000       48291
+  ID         STATUS   ENDPOINT                   LOCAL                PID
+  ──────────────────────────────────────────────────────────────────────────
+  a1b2c3d4   live     https://api.example.com    localhost:3000       48291
+  e5f6g7h8   live     203.0.113.10:10001         localhost:8080       48305
 ```
 
 ### Disconnect
 
 ```bash
-stairway disconnect a1b2c3d4   # by tunnel ID
-stairway disconnect all        # tear down everything
+stairway down a1b2c3d4   # by tunnel ID
+stairway down all        # tear down everything
 ```
 
-### Clean Up Stale Tunnels
-
-If a tunnel died without cleaning up its PID file:
+### Clean up stale entries
 
 ```bash
 stairway clean
 ```
 
-### Named Flags
+## Multiple Servers
 
-You can also use named flags instead of positional arguments:
+Name your servers during init and reference them with `--name`:
 
 ```bash
-stairway connect -r 80 -l 3000 -s deploy@myserver -k ~/.ssh/id_tunnel
+stairway init -s root@203.0.113.10 -n production
+stairway init -s root@10.0.0.50 -n staging
+
+stairway up 3000 -n production -d api.example.com
+stairway up 3000 -n staging
 ```
+
+The first server you init becomes the default. All commands use it unless you pass `--name`.
 
 ## What Gets Installed Where
 
-**On the server** (via server.sh):
+**On your VPS** (during `stairway init` and `stairway up -d`):
 
-* Modifies `/etc/ssh/sshd_config` (backup saved as `sshd_config.tunl.bak`)
-* Optionally installs nginx and certbot via your system package manager
-* Creates an nginx site config at `/etc/nginx/sites-available/<domain>`
+* Server script installed at `/opt/stairway/server.sh`
+* sshd config modified with `GatewayPorts yes` (backup at `sshd_config.stairway.bak`)
+* nginx site configs at `/etc/nginx/sites-available/<domain>` (only when using `--domain`)
+* SSL certificates managed by certbot (only when using `--domain`)
 
-**On your machine** (via stairway.sh):
+**On your machine**:
 
-* Tunnel state is stored in `~/.stairway/tunnels/`
-* Nothing is installed globally. The script is standalone.
+* Config and tunnel state stored in `~/.stairway/`
+* Nothing is installed globally beyond the `stairway` binary itself
 
 ## Security
 
-Opening a port on your VPS means anyone who knows the IP and port can reach your local service. Keep this in mind:
+Opening a tunnel means traffic can reach your local service. Keep this in mind:
 
-* Use nginx with SSL so traffic is encrypted end to end
-* Restrict access with firewall rules if the tunnel is not meant to be public
-* Your SSH tunnel itself is always encrypted
+* Use `--domain` so traffic goes through nginx with SSL encryption
+* Restrict access with firewall rules on the VPS if the tunnel should not be public
+* The SSH tunnel itself is always encrypted
 
 ## Requirements
 
