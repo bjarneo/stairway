@@ -77,7 +77,7 @@ _load_server() {
     _srv_host=$(grep '^HOST=' "$conf" | cut -d= -f2- | head -n1)
     _srv_key=$(grep '^SSH_KEY=' "$conf" | cut -d= -f2- | head -n1)
 
-    [[ -z "$_srv_host" ]] && die "Invalid config: HOST not set in ${conf}"
+    if [[ -z "$_srv_host" ]]; then die "Invalid config: HOST not set in ${conf}"; fi
 }
 
 # ── Find server.sh locally ────────────────────────────────────
@@ -186,7 +186,7 @@ cmd_init() {
         esac
     done
 
-    [[ -z "$host" ]] && die "Usage: stairway init -s user@host"
+    if [[ -z "$host" ]]; then die "Usage: stairway init -s user@host"; fi
 
     _validate_name "$name"
     ensure_dirs
@@ -244,7 +244,7 @@ cmd_up() {
         esac
     done
 
-    [[ -z "$local_port" ]] && die "Usage: stairway up <local_port> [-d domain] [-p remote_port]"
+    if [[ -z "$local_port" ]]; then die "Usage: stairway up <local_port> [-d domain] [-p remote_port]"; fi
 
     _validate_port "$local_port"
     if [[ -n "$remote_port" ]]; then _validate_port "$remote_port"; fi
@@ -351,7 +351,7 @@ cmd_down() {
     ensure_dirs
     local target="${1:-}"
 
-    [[ -z "$target" ]] && die "Usage: stairway down <id|all>"
+    if [[ -z "$target" ]]; then die "Usage: stairway down <id|all>"; fi
 
     if [[ "$target" == "all" ]]; then
         local count=0
@@ -361,7 +361,7 @@ cmd_down() {
             id=$(basename "$pid_file" .pid)
             _kill_tunnel "$id" && count=$((count + 1))
         done
-        [[ $count -eq 0 ]] && warn "No active tunnels." || info "Disconnected ${count} tunnel(s)."
+        if [[ $count -eq 0 ]]; then warn "No active tunnels."; else info "Disconnected ${count} tunnel(s)."; fi
         return
     fi
 
@@ -433,7 +433,7 @@ cmd_status() {
             "$PID"
     done
 
-    [[ $found -eq 0 ]] && echo "  ${DIM}No active tunnels.${RESET}"
+    if [[ $found -eq 0 ]]; then echo "  ${DIM}No active tunnels.${RESET}"; fi
     echo ""
 }
 
