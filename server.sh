@@ -102,10 +102,18 @@ cmd_nginx() {
     [[ -z "$domain" ]]      && die "Usage: server.sh nginx <domain> <tunnel_port>"
     [[ -z "$tunnel_port" ]] && die "Usage: server.sh nginx <domain> <tunnel_port>"
 
+    # Validate inputs
+    if [[ ! "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$ ]]; then
+        die "Invalid domain: ${domain}"
+    fi
+    if [[ ! "$tunnel_port" =~ ^[0-9]+$ ]] || [[ "$tunnel_port" -lt 1 ]] || [[ "$tunnel_port" -gt 65535 ]]; then
+        die "Invalid port: ${tunnel_port}"
+    fi
+
     need_root
 
     # Guard against port conflict
-    if [[ "$tunnel_port" == "80" || "$tunnel_port" == "443" ]]; then
+    if [[ "$tunnel_port" -eq 80 || "$tunnel_port" -eq 443 ]]; then
         die "Tunnel port ${tunnel_port} conflicts with nginx. Use a port above 1024."
     fi
 
@@ -150,13 +158,8 @@ NGINX
         die "nginx config test failed — check ${conf}"
     fi
 
-    # Open tunnel port in firewall
-    if command -v ufw &>/dev/null; then
-        ufw allow "${tunnel_port}/tcp" >/dev/null 2>&1
-    elif command -v firewall-cmd &>/dev/null; then
-        firewall-cmd --permanent --add-port="${tunnel_port}/tcp" >/dev/null 2>&1
-        firewall-cmd --reload >/dev/null 2>&1
-    fi
+    # Tunnel port is only accessed via localhost (nginx proxy_pass),
+    # so no firewall rule is needed — reduces attack surface.
 
     # SSL via certbot
     if ! command -v certbot &>/dev/null; then

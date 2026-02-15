@@ -27,6 +27,28 @@ die()  { err "$@"; exit 1; }
 
 ensure_dirs() { mkdir -p "$TUNNELS_DIR" "$SERVERS_DIR"; }
 
+# ── Input validation ──────────────────────────────────────────
+_validate_domain() {
+    local domain="$1"
+    if [[ ! "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$ ]]; then
+        die "Invalid domain: ${domain}"
+    fi
+}
+
+_validate_port() {
+    local port="$1"
+    if [[ ! "$port" =~ ^[0-9]+$ ]] || [[ "$port" -lt 1 ]] || [[ "$port" -gt 65535 ]]; then
+        die "Invalid port: ${port}"
+    fi
+}
+
+_validate_name() {
+    local name="$1"
+    if [[ ! "$name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        die "Invalid server name: ${name}. Use only alphanumeric characters, hyphens, and underscores."
+    fi
+}
+
 # ── Dependency check ──────────────────────────────────────────
 check_autossh() {
     command -v autossh &>/dev/null && return
@@ -45,16 +67,17 @@ check_autossh() {
 # ── Server config helpers ─────────────────────────────────────
 _load_server() {
     local name="$1"
+    _validate_name "$name"
     local conf="$SERVERS_DIR/${name}.conf"
 
     if [[ ! -f "$conf" ]]; then
         die "Server '${name}' not found. Run: stairway init -s user@host"
     fi
 
-    # shellcheck disable=SC1090
-    source "$conf"
-    _srv_host="${HOST:-}"
-    _srv_key="${SSH_KEY:-}"
+    _srv_host=$(grep '^HOST=' "$conf" | cut -d= -f2- | head -n1)
+    _srv_key=$(grep '^SSH_KEY=' "$conf" | cut -d= -f2- | head -n1)
+
+    [[ -z "$_srv_host" ]] && die "Invalid config: HOST not set in ${conf}"
 }
 
 # ── Find server.sh locally ────────────────────────────────────
@@ -75,6 +98,20 @@ _find_server_script() {
     fi
 }
 
+# ── Safe meta file reader ─────────────────────────────────────
+_read_meta() {
+    local file="$1"
+    TUNNEL_ID=$(grep '^TUNNEL_ID=' "$file" | cut -d= -f2- | head -n1)
+    REMOTE_PORT=$(grep '^REMOTE_PORT=' "$file" | cut -d= -f2- | head -n1)
+    LOCAL_PORT=$(grep '^LOCAL_PORT=' "$file" | cut -d= -f2- | head -n1)
+    LOCAL_HOST=$(grep '^LOCAL_HOST=' "$file" | cut -d= -f2- | head -n1)
+    SSH_HOST=$(grep '^SSH_HOST=' "$file" | cut -d= -f2- | head -n1)
+    DOMAIN=$(grep '^DOMAIN=' "$file" | cut -d= -f2- | head -n1)
+    PID=$(grep '^PID=' "$file" | cut -d= -f2- | head -n1)
+    SERVER=$(grep '^SERVER=' "$file" | cut -d= -f2- | head -n1)
+    STARTED=$(grep '^STARTED=' "$file" | cut -d= -f2- | head -n1)
+}
+
 # ── Auto port assignment ──────────────────────────────────────
 _next_port() {
     local port=10000
@@ -83,8 +120,7 @@ _next_port() {
     for meta in "$TUNNELS_DIR"/*.meta; do
         [[ -f "$meta" ]] || continue
         local REMOTE_PORT=""
-        # shellcheck disable=SC1090
-        source "$meta"
+        _read_meta "$meta"
         [[ -n "$REMOTE_PORT" ]] && used+=("$REMOTE_PORT")
     done
 
@@ -104,9 +140,8 @@ _replace_existing() {
     for meta in "$TUNNELS_DIR"/*.meta; do
         [[ -f "$meta" ]] || continue
 
-        local TUNNEL_ID="" REMOTE_PORT="" SSH_HOST="" DOMAIN="" PID=""
-        # shellcheck disable=SC1090
-        source "$meta"
+        local TUNNEL_ID="" REMOTE_PORT="" LOCAL_PORT="" LOCAL_HOST="" SSH_HOST="" DOMAIN="" PID="" SERVER="" STARTED=""
+        _read_meta "$meta"
 
         local match=false
 
@@ -153,6 +188,7 @@ cmd_init() {
 
     [[ -z "$host" ]] && die "Usage: stairway init -s user@host"
 
+    _validate_name "$name"
     ensure_dirs
 
     # Save server config
@@ -210,6 +246,10 @@ cmd_up() {
 
     [[ -z "$local_port" ]] && die "Usage: stairway up <local_port> [-d domain] [-p remote_port]"
 
+    _validate_port "$local_port"
+    [[ -n "$remote_port" ]] && _validate_port "$remote_port"
+    [[ -n "$domain" ]] && _validate_domain "$domain"
+
     check_autossh
     ensure_dirs
 
@@ -228,7 +268,7 @@ cmd_up() {
         info "Configuring ${BOLD}${domain}${RESET} on server..."
         local ssh_args=(-o "StrictHostKeyChecking=accept-new" -o "ConnectTimeout=10")
         [[ -n "$_srv_key" ]] && ssh_args+=(-i "$_srv_key")
-        ssh "${ssh_args[@]}" "$_srv_host" "sudo ${REMOTE_SCRIPT} nginx '${domain}' '${remote_port}'"
+        ssh "${ssh_args[@]}" "$_srv_host" sudo "${REMOTE_SCRIPT}" nginx "${domain}" "${remote_port}"
     fi
 
     # Check for existing tunnel with same ID (same host:port combo)
@@ -371,8 +411,7 @@ cmd_status() {
         found=1
 
         local TUNNEL_ID="" REMOTE_PORT="" LOCAL_PORT="" LOCAL_HOST="" SSH_HOST="" PID="" DOMAIN="" SERVER="" STARTED=""
-        # shellcheck disable=SC1090
-        source "$meta_file"
+        _read_meta "$meta_file"
 
         local status="${RED}dead${RESET}"
         if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
