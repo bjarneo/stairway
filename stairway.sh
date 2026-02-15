@@ -20,7 +20,7 @@ else
     RED="" GREEN="" YELLOW="" CYAN="" BOLD="" DIM="" RESET=""
 fi
 
-info() { printf "%s\n" "${GREEN}▸${RESET} $*"; }
+info() { printf "%s\n" "${GREEN}▸${RESET} $*" >&2; }
 warn() { printf "%s\n" "${YELLOW}▸${RESET} $*" >&2; }
 err()  { printf "%s\n" "${RED}✖${RESET} $*" >&2; }
 die()  { err "$@"; exit 1; }
