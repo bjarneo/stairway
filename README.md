@@ -84,6 +84,8 @@ stairway up 8080 -p 9090                     # explicit remote port
 stairway up 3000 -n staging                  # use a named server
 ```
 
+Running `up` again with the same domain or endpoint automatically replaces the previous tunnel. No need to manually `down` first.
+
 ### Check active tunnels
 
 ```bash
