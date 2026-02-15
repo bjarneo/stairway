@@ -97,6 +97,36 @@ _next_port() {
     echo "$port"
 }
 
+# ── Replace existing tunnel by domain or endpoint ─────────────
+_replace_existing() {
+    local host="$1" port="$2" domain="$3"
+
+    for meta in "$TUNNELS_DIR"/*.meta; do
+        [[ -f "$meta" ]] || continue
+
+        local TUNNEL_ID="" REMOTE_PORT="" SSH_HOST="" DOMAIN="" PID=""
+        # shellcheck disable=SC1090
+        source "$meta"
+
+        local match=false
+
+        # Match by domain
+        if [[ -n "$domain" && "$DOMAIN" == "$domain" ]]; then
+            match=true
+        fi
+
+        # Match by host:port (only when port is explicitly set)
+        if [[ -n "$port" && "$SSH_HOST" == "$host" && "$REMOTE_PORT" == "$port" ]]; then
+            match=true
+        fi
+
+        if $match; then
+            info "Replacing existing tunnel ${BOLD}${TUNNEL_ID}${RESET}..."
+            _kill_tunnel "$TUNNEL_ID" 2>/dev/null || rm -f "$TUNNELS_DIR/${TUNNEL_ID}.pid" "$meta"
+        fi
+    done
+}
+
 # ── Tunnel ID ─────────────────────────────────────────────────
 _tunnel_id() {
     printf "%s" "$1-$2" | md5sum 2>/dev/null | cut -c1-8 \
@@ -185,7 +215,10 @@ cmd_up() {
 
     _load_server "$name"
 
-    # Auto-assign remote port
+    # Replace any existing tunnel using the same domain or endpoint
+    _replace_existing "$_srv_host" "$remote_port" "$domain"
+
+    # Auto-assign remote port (after cleanup so freed ports can be reused)
     if [[ -z "$remote_port" ]]; then
         remote_port=$(_next_port)
     fi
@@ -198,7 +231,7 @@ cmd_up() {
         ssh "${ssh_args[@]}" "$_srv_host" "sudo ${REMOTE_SCRIPT} nginx '${domain}' '${remote_port}'"
     fi
 
-    # Check for existing tunnel
+    # Check for existing tunnel with same ID (same host:port combo)
     local id
     id=$(_tunnel_id "$remote_port" "$_srv_host")
     local pid_file="$TUNNELS_DIR/${id}.pid"
