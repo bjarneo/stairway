@@ -93,16 +93,16 @@ stairway status
 ```
 
 ```
-  ID         STATUS   ENDPOINT                   LOCAL                PID
-  ──────────────────────────────────────────────────────────────────────────
-  a1b2c3d4   live     https://api.example.com    localhost:3000       48291
-  e5f6g7h8   live     203.0.113.10:10001         localhost:8080       48305
+  ID         STATUS   SERVER       ENDPOINT                   LOCAL                PID
+  ────────────────────────────────────────────────────────────────────────────────────
+  a1b2c3d4   live     production   https://api.example.com    localhost:3000       48291
+  e5f6g7h8   live     staging      203.0.113.10:10001         localhost:8080       48305
 ```
 
 ### Disconnect
 
 ```bash
-stairway down a1b2c3d4   # by tunnel ID
+stairway down a1b2c3d4   # by tunnel ID (or partial: stairway down a1b)
 stairway down all        # tear down everything
 ```
 
@@ -112,6 +112,12 @@ This stops any active tunnel for the domain and removes the nginx config and SSL
 
 ```bash
 stairway domain rm api.example.com
+```
+
+### List configured servers
+
+```bash
+stairway servers
 ```
 
 ### Clean up stale entries
