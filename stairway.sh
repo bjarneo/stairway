@@ -242,14 +242,8 @@ cmd_update() {
     local self_path
     self_path="$(command -v stairway 2>/dev/null || true)"
 
-    if [[ -n "$self_path" && -w "$self_path" ]]; then
+    if [[ -n "$self_path" ]]; then
         info "Updating stairway..."
-        curl -fsSL "${REPO_URL}/stairway.sh" -o "${self_path}.tmp"
-        chmod +x "${self_path}.tmp"
-        mv "${self_path}.tmp" "$self_path"
-        info "stairway updated."
-    elif [[ -n "$self_path" ]]; then
-        info "Updating stairway (requires sudo)..."
         curl -fsSL "${REPO_URL}/stairway.sh" -o /tmp/stairway-update
         chmod +x /tmp/stairway-update
         sudo mv /tmp/stairway-update "$self_path"
