@@ -224,6 +224,73 @@ EOF
     echo ""
 }
 
+# ── update ────────────────────────────────────────────────────
+cmd_update() {
+    local name="default"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -n|--name) name="$2"; shift 2 ;;
+            -*)        die "Unknown option: $1" ;;
+            *)         die "Unexpected argument: $1" ;;
+        esac
+    done
+
+    ensure_dirs
+
+    # Update local stairway binary
+    local self_path
+    self_path="$(command -v stairway 2>/dev/null || true)"
+
+    if [[ -n "$self_path" && -w "$self_path" ]]; then
+        info "Updating stairway..."
+        curl -fsSL "${REPO_URL}/stairway.sh" -o "${self_path}.tmp"
+        chmod +x "${self_path}.tmp"
+        mv "${self_path}.tmp" "$self_path"
+        info "stairway updated."
+    elif [[ -n "$self_path" ]]; then
+        info "Updating stairway (requires sudo)..."
+        curl -fsSL "${REPO_URL}/stairway.sh" -o /tmp/stairway-update
+        chmod +x /tmp/stairway-update
+        sudo mv /tmp/stairway-update "$self_path"
+        info "stairway updated."
+    else
+        warn "Could not find stairway in PATH — skipping self-update."
+    fi
+
+    # Update cached server.sh
+    info "Downloading latest server.sh..."
+    mkdir -p "$STATE_DIR"
+    curl -fsSL "${REPO_URL}/server.sh" -o "$STATE_DIR/server.sh"
+    chmod +x "$STATE_DIR/server.sh"
+
+    # Upload to server if configured
+    if [[ -f "$SERVERS_DIR/${name}.conf" ]]; then
+        _load_server "$name"
+
+        info "Uploading server.sh to ${BOLD}${_srv_host}${RESET}..."
+
+        local scp_args=(-o "StrictHostKeyChecking=accept-new")
+        if [[ -n "$_srv_key" ]]; then scp_args+=(-i "$_srv_key"); fi
+
+        scp "${scp_args[@]}" "$STATE_DIR/server.sh" "${_srv_host}:/tmp/stairway-server.sh"
+
+        local ssh_args=(-o "StrictHostKeyChecking=accept-new" -o "ConnectTimeout=10")
+        if [[ -n "$_srv_key" ]]; then ssh_args+=(-i "$_srv_key"); fi
+
+        ssh "${ssh_args[@]}" "$_srv_host" \
+            "sudo mv /tmp/stairway-server.sh ${REMOTE_SCRIPT} && sudo chmod +x ${REMOTE_SCRIPT}"
+
+        info "Server component updated."
+    else
+        warn "No server '${name}' configured — skipping remote update."
+    fi
+
+    echo ""
+    info "Update complete."
+    echo ""
+}
+
 # ── up ────────────────────────────────────────────────────────
 cmd_up() {
     local local_port="" domain="" remote_port="" name="default"
@@ -529,6 +596,7 @@ cmd_help() {
 
   ${BOLD}COMMANDS${RESET}
     init     ${DIM}-s <user@host>${RESET}             Set up a new server
+    update                                Re-upload server.sh to the server
     up       ${DIM}<local_port>${RESET}                Expose a local port
     down     ${DIM}<id|all>${RESET}                    Close tunnel(s)
     domain rm ${DIM}<domain>${RESET}               Remove a domain from the server
@@ -578,6 +646,7 @@ main() {
 
     case "$cmd" in
         init|i)         cmd_init "$@" ;;
+        update)         cmd_update "$@" ;;
         up|u)           cmd_up "$@" ;;
         down|d)         cmd_down "$@" ;;
         domain)         cmd_domain "$@" ;;
