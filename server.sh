@@ -173,6 +173,50 @@ NGINX
     info "SSL configured. https://${domain} is ready."
 }
 
+# ── nginx-remove ──────────────────────────────────────────────
+# Removes nginx config and SSL certificate for a domain.
+# Usage: server.sh nginx-remove <domain>
+cmd_nginx_remove() {
+    local domain="${1:-}"
+
+    [[ -z "$domain" ]] && die "Usage: server.sh nginx-remove <domain>"
+
+    # Validate input
+    if [[ ! "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$ ]]; then
+        die "Invalid domain: ${domain}"
+    fi
+
+    need_root
+
+    local conf="/etc/nginx/sites-available/${domain}"
+    local enabled="/etc/nginx/sites-enabled/${domain}"
+
+    # Remove nginx config
+    if [[ -f "$conf" ]] || [[ -L "$enabled" ]]; then
+        rm -f "$enabled" "$conf"
+        if nginx -t 2>/dev/null; then
+            systemctl reload nginx
+            info "nginx config for ${domain} removed."
+        else
+            warn "nginx config removed but reload failed — check manually."
+        fi
+    else
+        warn "No nginx config found for ${domain}."
+    fi
+
+    # Remove SSL certificate
+    if command -v certbot &>/dev/null; then
+        if certbot certificates -d "$domain" 2>/dev/null | grep -q "$domain"; then
+            certbot delete --cert-name "$domain" --non-interactive 2>/dev/null
+            info "SSL certificate for ${domain} removed."
+        else
+            info "No SSL certificate found for ${domain}."
+        fi
+    fi
+
+    info "Domain ${domain} cleaned up."
+}
+
 # ── help ──────────────────────────────────────────────────────
 cmd_help() {
     cat <<EOF
@@ -185,10 +229,12 @@ cmd_help() {
   COMMANDS
     setup                       Configure sshd + firewall for tunneling
     nginx <domain> <port>       Set up nginx reverse proxy + SSL
+    nginx-remove <domain>       Remove nginx config + SSL for a domain
 
   EXAMPLES
     sudo server.sh setup
     sudo server.sh nginx api.example.com 8080
+    sudo server.sh nginx-remove api.example.com
 
 EOF
 }
@@ -201,6 +247,7 @@ main() {
     case "$cmd" in
         setup)          cmd_setup "$@" ;;
         nginx)          cmd_nginx "$@" ;;
+        nginx-remove)   cmd_nginx_remove "$@" ;;
         help|-h|--help) cmd_help ;;
         *)              die "Unknown command: ${cmd}. Run: server.sh help" ;;
     esac

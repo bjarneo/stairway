@@ -106,6 +106,14 @@ stairway down a1b2c3d4   # by tunnel ID
 stairway down all        # tear down everything
 ```
 
+### Remove a domain
+
+This stops any active tunnel for the domain and removes the nginx config and SSL certificate from the server:
+
+```bash
+stairway domain rm api.example.com
+```
+
 ### Clean up stale entries
 
 ```bash

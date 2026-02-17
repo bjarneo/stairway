@@ -346,6 +346,67 @@ EOF
     fi
 }
 
+# ── domain ────────────────────────────────────────────────────
+cmd_domain() {
+    local subcmd="${1:-}"
+    shift || true
+
+    case "$subcmd" in
+        rm|remove) cmd_domain_remove "$@" ;;
+        *)
+            err "Usage: stairway domain rm <domain> [-n server_name]"
+            exit 1
+            ;;
+    esac
+}
+
+cmd_domain_remove() {
+    local domain="" name="default"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -n|--name) name="$2"; shift 2 ;;
+            -*)        die "Unknown option: $1" ;;
+            *)
+                if [[ -z "$domain" ]]; then
+                    domain="$1"; shift
+                else
+                    die "Unexpected argument: $1"
+                fi
+                ;;
+        esac
+    done
+
+    if [[ -z "$domain" ]]; then die "Usage: stairway domain rm <domain>"; fi
+
+    _validate_domain "$domain"
+    ensure_dirs
+    _load_server "$name"
+
+    # Kill any active tunnel using this domain
+    for meta in "$TUNNELS_DIR"/*.meta; do
+        [[ -f "$meta" ]] || continue
+
+        local TUNNEL_ID="" REMOTE_PORT="" LOCAL_PORT="" LOCAL_HOST="" SSH_HOST="" DOMAIN="" PID="" SERVER="" STARTED=""
+        _read_meta "$meta"
+
+        if [[ "$DOMAIN" == "$domain" ]]; then
+            info "Stopping tunnel ${BOLD}${TUNNEL_ID}${RESET}..."
+            _kill_tunnel "$TUNNEL_ID" 2>/dev/null || rm -f "$TUNNELS_DIR/${TUNNEL_ID}.pid" "$meta"
+        fi
+    done
+
+    # Remove nginx + SSL on server
+    info "Removing ${BOLD}${domain}${RESET} from server..."
+    local ssh_args=(-o "StrictHostKeyChecking=accept-new" -o "ConnectTimeout=10")
+    if [[ -n "$_srv_key" ]]; then ssh_args+=(-i "$_srv_key"); fi
+    ssh "${ssh_args[@]}" "$_srv_host" sudo "${REMOTE_SCRIPT}" nginx-remove "${domain}"
+
+    echo ""
+    info "${domain} removed."
+    echo ""
+}
+
 # ── down ──────────────────────────────────────────────────────
 cmd_down() {
     ensure_dirs
@@ -470,6 +531,7 @@ cmd_help() {
     init     ${DIM}-s <user@host>${RESET}             Set up a new server
     up       ${DIM}<local_port>${RESET}                Expose a local port
     down     ${DIM}<id|all>${RESET}                    Close tunnel(s)
+    domain rm ${DIM}<domain>${RESET}               Remove a domain from the server
     status                                List active tunnels
     clean                                 Remove stale entries
 
@@ -500,6 +562,9 @@ cmd_help() {
     ${DIM}# Check tunnels${RESET}
     stairway status
 
+    ${DIM}# Remove a domain${RESET}
+    stairway domain rm api.example.com
+
     ${DIM}# Tear down${RESET}
     stairway down all
 
@@ -515,6 +580,7 @@ main() {
         init|i)         cmd_init "$@" ;;
         up|u)           cmd_up "$@" ;;
         down|d)         cmd_down "$@" ;;
+        domain)         cmd_domain "$@" ;;
         status|s|ls)    cmd_status "$@" ;;
         clean)          cmd_clean "$@" ;;
         version|-v)     echo "stairway v${VERSION}" ;;
