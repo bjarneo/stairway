@@ -58,7 +58,7 @@ cmd_setup() {
     if grep -qE '^\s*GatewayPorts\s+yes' "$sshd_config"; then
         info "GatewayPorts already enabled."
     else
-        sed -i '/^#\?GatewayPorts/d' "$sshd_config"
+        sed -i '/^[[:space:]]*#\?[[:space:]]*GatewayPorts/d' "$sshd_config"
         echo "GatewayPorts yes" >> "$sshd_config"
         info "GatewayPorts enabled."
     fi
@@ -167,10 +167,21 @@ NGINX
         install_pkg certbot python3-certbot-nginx
     fi
 
-    info "Requesting SSL certificate for ${domain}..."
-    certbot --nginx -d "$domain" --non-interactive --agree-tos --register-unsafely-without-email
-
-    info "SSL configured. https://${domain} is ready."
+    if certbot certificates -d "$domain" 2>/dev/null | grep -q "Certificate Name: ${domain}"; then
+        info "SSL certificate for ${domain} already exists — skipping certbot."
+        # Ensure nginx is configured for SSL (certbot may need to update config)
+        certbot --nginx -d "$domain" --non-interactive --agree-tos --register-unsafely-without-email --keep-until-expiring 2>/dev/null || true
+    else
+        info "Requesting SSL certificate for ${domain}..."
+        if certbot --nginx -d "$domain" --non-interactive --agree-tos --register-unsafely-without-email; then
+            info "SSL configured. https://${domain} is ready."
+        else
+            warn "SSL certificate request failed. The tunnel is accessible via HTTP only:"
+            warn "  http://${domain}"
+            warn "Common causes: DNS not pointed to this server, Let's Encrypt rate limit."
+            exit 1
+        fi
+    fi
 }
 
 # ── nginx-remove ──────────────────────────────────────────────

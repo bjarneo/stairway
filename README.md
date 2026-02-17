@@ -120,6 +120,16 @@ stairway domain rm api.example.com
 stairway clean
 ```
 
+## Update
+
+Update both the local stairway binary and the server component in one command:
+
+```bash
+stairway update
+```
+
+This downloads the latest version from GitHub, replaces the installed binary (requires sudo), and uploads the new server.sh to your VPS.
+
 ## Multiple Servers
 
 Name your servers during init and reference them with `--name`:

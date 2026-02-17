@@ -71,7 +71,7 @@ _load_server() {
     local conf="$SERVERS_DIR/${name}.conf"
 
     if [[ ! -f "$conf" ]]; then
-        die "Server '${name}' not found. Run: stairway init -s user@host"
+        die "Server '${name}' not found. Initialize with: stairway init -s user@host -n ${name}  |  List servers: stairway servers"
     fi
 
     _srv_host=$(grep '^HOST=' "$conf" | cut -d= -f2- | head -n1)
@@ -114,28 +114,39 @@ _read_meta() {
 
 # ── Auto port assignment ──────────────────────────────────────
 _next_port() {
-    local port=10000
-    local used=()
+    (
+        # Acquire exclusive lock to prevent concurrent port assignment
+        flock -x 200
 
-    for meta in "$TUNNELS_DIR"/*.meta; do
-        [[ -f "$meta" ]] || continue
-        local REMOTE_PORT=""
-        _read_meta "$meta"
-        if [[ -n "$REMOTE_PORT" ]]; then used+=("$REMOTE_PORT"); fi
-    done
+        local port=10000
+        local used=()
 
-    if [[ ${#used[@]} -gt 0 ]]; then
-        while printf '%s\n' "${used[@]}" | grep -qx "$port"; do
-            port=$((port + 1))
+        for meta in "$TUNNELS_DIR"/*.meta; do
+            [[ -f "$meta" ]] || continue
+            local REMOTE_PORT=""
+            _read_meta "$meta"
+            if [[ -n "$REMOTE_PORT" ]]; then used+=("$REMOTE_PORT"); fi
         done
-    fi
 
-    echo "$port"
+        if [[ ${#used[@]} -gt 0 ]]; then
+            while printf '%s\n' "${used[@]}" | grep -qx "$port"; do
+                port=$((port + 1))
+            done
+        fi
+
+        # Reserve the port by creating a placeholder meta file
+        local placeholder="$TUNNELS_DIR/.port-${port}.lock"
+        touch "$placeholder"
+
+        echo "$port"
+    ) 200>"$STATE_DIR/.port_assignment.lock"
 }
 
 # ── Replace existing tunnel by domain or endpoint ─────────────
+# Prints the replaced tunnel's remote port on stdout (for reuse).
 _replace_existing() {
-    local host="$1" port="$2" domain="$3"
+    local host="$1" port="$2" domain="$3" local_port="$4" name="$5"
+    local _reused_port=""
 
     for meta in "$TUNNELS_DIR"/*.meta; do
         [[ -f "$meta" ]] || continue
@@ -155,11 +166,19 @@ _replace_existing() {
             match=true
         fi
 
+        # Match by server + local port (auto-assigned port, no domain)
+        if [[ -z "$domain" && -z "$port" && "$SERVER" == "$name" && "$LOCAL_PORT" == "$local_port" && "$SSH_HOST" == "$host" ]]; then
+            match=true
+        fi
+
         if $match; then
+            _reused_port="$REMOTE_PORT"
             info "Replacing existing tunnel ${BOLD}${TUNNEL_ID}${RESET}..."
             _kill_tunnel "$TUNNEL_ID" 2>/dev/null || rm -f "$TUNNELS_DIR/${TUNNEL_ID}.pid" "$meta"
         fi
     done
+
+    echo "$_reused_port"
 }
 
 # ── Tunnel ID ─────────────────────────────────────────────────
@@ -191,6 +210,19 @@ cmd_init() {
     _validate_name "$name"
     ensure_dirs
 
+    # Check if SSH key is encrypted (needs ssh-agent)
+    if [[ -n "$ssh_key" ]]; then
+        if [[ ! -f "$ssh_key" ]]; then
+            die "SSH key not found: ${ssh_key}"
+        fi
+        if ! ssh-keygen -y -P "" -f "$ssh_key" &>/dev/null; then
+            warn "SSH key appears to be encrypted. Ensure it is loaded in ssh-agent:"
+            echo "    ${DIM}eval \$(ssh-agent -s)${RESET}"
+            echo "    ${DIM}ssh-add ${ssh_key}${RESET}"
+            echo ""
+        fi
+    fi
+
     # Save server config
     cat > "$SERVERS_DIR/${name}.conf" <<EOF
 HOST=${host}
@@ -207,6 +239,12 @@ EOF
     local scp_args=(-o "StrictHostKeyChecking=accept-new")
     local ssh_args=(-o "StrictHostKeyChecking=accept-new" -o "ConnectTimeout=10")
     if [[ -n "$ssh_key" ]]; then scp_args+=(-i "$ssh_key"); ssh_args+=(-i "$ssh_key"); fi
+
+    # Validate sudo access on remote
+    if ! ssh "${ssh_args[@]}" "$host" "sudo -n true" &>/dev/null; then
+        warn "The SSH user may not have passwordless sudo access."
+        warn "If init fails, configure sudoers on ${host} or use root@host."
+    fi
 
     # Upload and install
     scp "${scp_args[@]}" "$script" "${host}:/tmp/stairway-server.sh"
@@ -244,10 +282,20 @@ cmd_update() {
 
     if [[ -n "$self_path" ]]; then
         info "Updating stairway..."
-        curl -fsSL "${REPO_URL}/stairway.sh" -o /tmp/stairway-update
-        chmod +x /tmp/stairway-update
-        sudo mv /tmp/stairway-update "$self_path"
-        info "stairway updated."
+        local tmpfile="/tmp/stairway-update-$$"
+        if curl -fsSL "${REPO_URL}/stairway.sh" -o "$tmpfile"; then
+            if head -n1 "$tmpfile" | grep -q '^#!/'; then
+                chmod +x "$tmpfile"
+                sudo mv "$tmpfile" "$self_path"
+                info "stairway updated."
+            else
+                rm -f "$tmpfile"
+                die "Downloaded file appears corrupted — update aborted."
+            fi
+        else
+            rm -f "$tmpfile"
+            die "Failed to download stairway update."
+        fi
     else
         warn "Could not find stairway in PATH — skipping self-update."
     fi
@@ -255,8 +303,19 @@ cmd_update() {
     # Update cached server.sh
     info "Downloading latest server.sh..."
     mkdir -p "$STATE_DIR"
-    curl -fsSL "${REPO_URL}/server.sh" -o "$STATE_DIR/server.sh"
-    chmod +x "$STATE_DIR/server.sh"
+    local srv_tmp="/tmp/stairway-server-update-$$"
+    if curl -fsSL "${REPO_URL}/server.sh" -o "$srv_tmp"; then
+        if head -n1 "$srv_tmp" | grep -q '^#!/'; then
+            mv "$srv_tmp" "$STATE_DIR/server.sh"
+            chmod +x "$STATE_DIR/server.sh"
+        else
+            rm -f "$srv_tmp"
+            die "Downloaded server.sh appears corrupted — update aborted."
+        fi
+    else
+        rm -f "$srv_tmp"
+        die "Failed to download server.sh update."
+    fi
 
     # Upload to server if configured
     if [[ -f "$SERVERS_DIR/${name}.conf" ]]; then
@@ -317,11 +376,16 @@ cmd_up() {
     _load_server "$name"
 
     # Replace any existing tunnel using the same domain or endpoint
-    _replace_existing "$_srv_host" "$remote_port" "$domain"
+    local reused_port
+    reused_port=$(_replace_existing "$_srv_host" "$remote_port" "$domain" "$local_port" "$name")
 
-    # Auto-assign remote port (after cleanup so freed ports can be reused)
+    # Reuse the previous tunnel's port (keeps nginx config valid), or auto-assign
     if [[ -z "$remote_port" ]]; then
-        remote_port=$(_next_port)
+        if [[ -n "$reused_port" ]]; then
+            remote_port="$reused_port"
+        else
+            remote_port=$(_next_port)
+        fi
     fi
 
     # Set up domain remotely if requested
@@ -394,6 +458,9 @@ PID=${pid}
 SERVER=${name}
 STARTED=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 EOF
+        # Clean up port reservation placeholder
+        rm -f "$TUNNELS_DIR/.port-${remote_port}.lock"
+
         info "${GREEN}Tunnel is live!${RESET} (PID ${pid})"
         echo ""
         if [[ -n "$domain" ]]; then
@@ -445,6 +512,7 @@ cmd_domain_remove() {
     _load_server "$name"
 
     # Kill any active tunnel using this domain
+    local found_tunnel=false
     for meta in "$TUNNELS_DIR"/*.meta; do
         [[ -f "$meta" ]] || continue
 
@@ -452,10 +520,15 @@ cmd_domain_remove() {
         _read_meta "$meta"
 
         if [[ "$DOMAIN" == "$domain" ]]; then
-            info "Stopping tunnel ${BOLD}${TUNNEL_ID}${RESET}..."
+            found_tunnel=true
+            info "Stopping tunnel ${BOLD}${TUNNEL_ID}${RESET} (localhost:${LOCAL_PORT})..."
             _kill_tunnel "$TUNNEL_ID" 2>/dev/null || rm -f "$TUNNELS_DIR/${TUNNEL_ID}.pid" "$meta"
         fi
     done
+
+    if ! $found_tunnel; then
+        warn "No active tunnel found for ${domain} — removing server config only."
+    fi
 
     # Remove nginx + SSL on server
     info "Removing ${BOLD}${domain}${RESET} from server..."
@@ -487,7 +560,24 @@ cmd_down() {
         return
     fi
 
-    _kill_tunnel "$target"
+    # Support partial ID matching
+    local matches=()
+    for pid_file in "$TUNNELS_DIR"/*.pid; do
+        [[ -f "$pid_file" ]] || continue
+        local id
+        id=$(basename "$pid_file" .pid)
+        if [[ "$id" == "$target"* ]]; then
+            matches+=("$id")
+        fi
+    done
+
+    if [[ ${#matches[@]} -eq 0 ]]; then
+        die "No tunnel found matching: ${target}"
+    elif [[ ${#matches[@]} -eq 1 ]]; then
+        _kill_tunnel "${matches[0]}"
+    else
+        die "Ambiguous tunnel ID '${target}'. Matches: ${matches[*]}"
+    fi
 }
 
 _kill_tunnel() {
@@ -525,8 +615,8 @@ cmd_status() {
     local found=0
 
     echo ""
-    printf "${BOLD}  %-10s %-8s %-26s %-20s %s${RESET}\n" "ID" "STATUS" "ENDPOINT" "LOCAL" "PID"
-    printf "  ${DIM}──────────────────────────────────────────────────────────────────────────${RESET}\n"
+    printf "${BOLD}  %-10s %-8s %-12s %-26s %-20s %s${RESET}\n" "ID" "STATUS" "SERVER" "ENDPOINT" "LOCAL" "PID"
+    printf "  ${DIM}────────────────────────────────────────────────────────────────────────────────────${RESET}\n"
 
     for meta_file in "$TUNNELS_DIR"/*.meta; do
         [[ -f "$meta_file" ]] || continue
@@ -535,9 +625,13 @@ cmd_status() {
         local TUNNEL_ID="" REMOTE_PORT="" LOCAL_PORT="" LOCAL_HOST="" SSH_HOST="" PID="" DOMAIN="" SERVER="" STARTED=""
         _read_meta "$meta_file"
 
-        local status="${RED}dead${RESET}"
+        local status status_display
         if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
-            status="${GREEN}live${RESET}"
+            status="live"
+            status_display="${GREEN}live${RESET}"
+        else
+            status="dead"
+            status_display="${RED}dead${RESET}"
         fi
 
         local endpoint
@@ -547,15 +641,48 @@ cmd_status() {
             endpoint="${SSH_HOST}:${REMOTE_PORT}"
         fi
 
-        printf "  %-10s %-17s %-26s %-20s %s\n" \
+        # Color codes add 9 invisible bytes; pad status field to compensate
+        printf "  %-10s %-17s %-12s %-26s %-20s %s\n" \
             "$TUNNEL_ID" \
-            "$status" \
+            "$status_display" \
+            "${SERVER:-default}" \
             "$endpoint" \
             "localhost:${LOCAL_PORT}" \
             "$PID"
+
+        if [[ -n "$DOMAIN" && "$status" == "dead" ]]; then
+            printf "  ${YELLOW}%s${RESET}\n" "  ↳ orphaned domain — run: stairway domain rm ${DOMAIN}"
+        fi
     done
 
     if [[ $found -eq 0 ]]; then echo "  ${DIM}No active tunnels.${RESET}"; fi
+    echo ""
+}
+
+# ── servers ───────────────────────────────────────────────────
+cmd_servers() {
+    ensure_dirs
+    local found=0
+
+    echo ""
+    printf "${BOLD}  %-16s %-30s %s${RESET}\n" "NAME" "HOST" "SSH_KEY"
+    printf "  ${DIM}────────────────────────────────────────────────────────────────${RESET}\n"
+
+    for conf in "$SERVERS_DIR"/*.conf; do
+        [[ -f "$conf" ]] || continue
+        found=1
+
+        local srv_name
+        srv_name=$(basename "$conf" .conf)
+        local srv_host
+        srv_host=$(grep '^HOST=' "$conf" | cut -d= -f2- | head -n1)
+        local srv_key
+        srv_key=$(grep '^SSH_KEY=' "$conf" | cut -d= -f2- | head -n1)
+
+        printf "  %-16s %-30s %s\n" "$srv_name" "$srv_host" "${srv_key:--}"
+    done
+
+    if [[ $found -eq 0 ]]; then echo "  ${DIM}No servers configured. Run: stairway init -s user@host${RESET}"; fi
     echo ""
 }
 
@@ -571,12 +698,20 @@ cmd_clean() {
         if ! kill -0 "$pid" 2>/dev/null; then
             local id
             id=$(basename "$pid_file" .pid)
+            info "Removing stale tunnel ${BOLD}${id}${RESET} (PID ${pid})"
             rm -f "$pid_file" "$TUNNELS_DIR/${id}.meta"
             count=$((count + 1))
         fi
     done
 
-    info "Cleaned ${count} stale tunnel(s)."
+    # Clean up port reservation lock files
+    rm -f "$TUNNELS_DIR"/.port-*.lock
+
+    if [[ $count -eq 0 ]]; then
+        info "No stale tunnels found."
+    else
+        info "Cleaned ${count} stale tunnel(s)."
+    fi
 }
 
 # ── help ──────────────────────────────────────────────────────
@@ -595,6 +730,7 @@ cmd_help() {
     down     ${DIM}<id|all>${RESET}                    Close tunnel(s)
     domain rm ${DIM}<domain>${RESET}               Remove a domain from the server
     status                                List active tunnels
+    servers                               List configured servers
     clean                                 Remove stale entries
 
   ${BOLD}INIT OPTIONS${RESET}
@@ -645,6 +781,7 @@ main() {
         down|d)         cmd_down "$@" ;;
         domain)         cmd_domain "$@" ;;
         status|s|ls)    cmd_status "$@" ;;
+        servers)        cmd_servers "$@" ;;
         clean)          cmd_clean "$@" ;;
         version|-v)     echo "stairway v${VERSION}" ;;
         help|-h|--help) cmd_help ;;
