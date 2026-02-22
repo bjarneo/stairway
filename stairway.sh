@@ -390,10 +390,24 @@ cmd_up() {
 
     # Set up domain remotely if requested
     if [[ -n "$domain" ]]; then
+        # Prompt for SSL challenge type
+        local cert_mode="http"
+        echo ""
+        info "How should the SSL certificate be validated?"
+        echo "  ${BOLD}1)${RESET} HTTP challenge ${DIM}(default — DNS must already point to server)${RESET}"
+        echo "  ${BOLD}2)${RESET} DNS TXT record ${DIM}(manually add a TXT record when prompted)${RESET}"
+        echo ""
+        printf "  Choose [1/2]: "
+        local choice
+        read -r choice
+        if [[ "$choice" == "2" ]]; then
+            cert_mode="dns"
+        fi
+
         info "Configuring ${BOLD}${domain}${RESET} on server..."
         local ssh_args=(-o "StrictHostKeyChecking=accept-new" -o "ConnectTimeout=10")
         if [[ -n "$_srv_key" ]]; then ssh_args+=(-i "$_srv_key"); fi
-        ssh "${ssh_args[@]}" "$_srv_host" sudo "${REMOTE_SCRIPT}" nginx "${domain}" "${remote_port}"
+        ssh "${ssh_args[@]}" "$_srv_host" sudo "${REMOTE_SCRIPT}" nginx "${domain}" "${remote_port}" "${cert_mode}"
     fi
 
     # Check for existing tunnel with same ID (same host:port combo)

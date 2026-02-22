@@ -63,7 +63,7 @@ That's it. Stairway auto-assigns a remote port and prints the public URL.
 stairway up 3000 -d api.example.com
 ```
 
-This automatically installs nginx on your VPS, configures a reverse proxy, provisions an SSL certificate via Let's Encrypt, and opens the tunnel. Point your domain's A record to your VPS IP beforehand.
+This automatically installs nginx on your VPS, configures a reverse proxy, provisions an SSL certificate via Let's Encrypt, and opens the tunnel. You'll be prompted to choose between HTTP validation (default — requires DNS already pointing to the server) or DNS TXT record validation (you add a `_acme-challenge` TXT record when prompted).
 
 ## Usage
 
@@ -85,6 +85,17 @@ stairway up 3000 -n staging                  # use a named server
 ```
 
 Running `up` again with the same domain or endpoint automatically replaces the previous tunnel. No need to manually `down` first.
+
+### SSL certificate validation
+
+When using `--domain`, stairway prompts you to choose how Let's Encrypt validates domain ownership:
+
+| Mode | When to use |
+|------|-------------|
+| **HTTP challenge** (default) | DNS A record already points to your VPS |
+| **DNS TXT record** | DNS not yet pointed to server, server behind firewall, or wildcard certs |
+
+With DNS mode, certbot will display a TXT record name and value. Add it at your DNS provider, wait for propagation, then press Enter to continue.
 
 ### Check active tunnels
 

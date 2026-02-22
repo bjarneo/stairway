@@ -98,9 +98,10 @@ cmd_setup() {
 cmd_nginx() {
     local domain="${1:-}"
     local tunnel_port="${2:-}"
+    local cert_mode="${3:-http}"
 
-    [[ -z "$domain" ]]      && die "Usage: server.sh nginx <domain> <tunnel_port>"
-    [[ -z "$tunnel_port" ]] && die "Usage: server.sh nginx <domain> <tunnel_port>"
+    [[ -z "$domain" ]]      && die "Usage: server.sh nginx <domain> <tunnel_port> [http|dns]"
+    [[ -z "$tunnel_port" ]] && die "Usage: server.sh nginx <domain> <tunnel_port> [http|dns]"
 
     # Validate inputs
     if [[ ! "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$ ]]; then
@@ -171,6 +172,18 @@ NGINX
         info "SSL certificate for ${domain} already exists — skipping certbot."
         # Ensure nginx is configured for SSL (certbot may need to update config)
         certbot --nginx -d "$domain" --non-interactive --agree-tos --register-unsafely-without-email --keep-until-expiring 2>/dev/null || true
+    elif [[ "$cert_mode" == "dns" ]]; then
+        info "Requesting SSL certificate for ${domain} via DNS TXT record..."
+        info "You will be prompted to create a DNS TXT record."
+        if certbot certonly --manual --preferred-challenges dns -d "$domain" --agree-tos --register-unsafely-without-email; then
+            # Apply the certificate to nginx
+            certbot install --nginx -d "$domain" --non-interactive 2>/dev/null || true
+            info "SSL configured. https://${domain} is ready."
+        else
+            warn "SSL certificate request failed. The tunnel is accessible via HTTP only:"
+            warn "  http://${domain}"
+            exit 1
+        fi
     else
         info "Requesting SSL certificate for ${domain}..."
         if certbot --nginx -d "$domain" --non-interactive --agree-tos --register-unsafely-without-email; then
@@ -238,13 +251,14 @@ cmd_help() {
     sudo server.sh <command> [args]
 
   COMMANDS
-    setup                       Configure sshd + firewall for tunneling
-    nginx <domain> <port>       Set up nginx reverse proxy + SSL
-    nginx-remove <domain>       Remove nginx config + SSL for a domain
+    setup                              Configure sshd + firewall for tunneling
+    nginx <domain> <port> [http|dns]   Set up nginx reverse proxy + SSL
+    nginx-remove <domain>              Remove nginx config + SSL for a domain
 
   EXAMPLES
     sudo server.sh setup
     sudo server.sh nginx api.example.com 8080
+    sudo server.sh nginx api.example.com 8080 dns
     sudo server.sh nginx-remove api.example.com
 
 EOF
